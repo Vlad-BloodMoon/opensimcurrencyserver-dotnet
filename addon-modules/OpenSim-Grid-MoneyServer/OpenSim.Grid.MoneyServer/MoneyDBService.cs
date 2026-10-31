@@ -204,7 +204,24 @@ namespace OpenSim.Grid.MoneyServer
                     if (!msm.Locked)
                     {
                         msm.GetLock();
-                        return msm;
+                        try
+                        {
+                            // A server restart can leave a MySqlConnection marked Open
+                            // although its underlying network session is gone.
+                            if (msm.Manager.dbcon == null || !msm.Manager.dbcon.Ping())
+                            {
+                                m_log.Warn("[MONEY DB]: Stale MySQL connection detected; reconnecting before the next operation.");
+                                msm.Manager.Reconnect();
+                            }
+                            return msm;
+                        }
+                        catch (Exception e)
+                        {
+                            // Do not leak this slot when MySQL is still unavailable.
+                            msm.Release();
+                            m_log.Error("[MONEY DB]: Database unavailable; next request will attempt recovery", e);
+                            throw;
+                        }
                     }
 
                     lockedCons++;
