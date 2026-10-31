@@ -357,9 +357,10 @@ namespace OpenSim.Grid.MoneyServer
             }
             catch (MySql.Data.MySqlClient.MySqlException e)
             {
-                e.ToString();
-                dbm.Manager.Reconnect();
-                return dbm.Manager.withdrawMoney(transactionID, senderID, amount);
+                m_log.ErrorFormat("[MONEY DB]: Withdrawal {0} has an uncertain outcome; do not retry automatically: {1}", transactionID, e);
+                try { dbm.Manager.Reconnect(); }
+                catch (Exception reconnectError) { m_log.Error("[MONEY DB]: Reconnect failed after withdrawal", reconnectError); }
+                return false;
             }
             catch (Exception e)
             {
@@ -382,9 +383,10 @@ namespace OpenSim.Grid.MoneyServer
             }
             catch (MySqlException e)
             {
-                m_log.Error(e);
-                dbm.Manager.Reconnect();
-                return dbm.Manager.giveMoney(transactionID, receiverID, amount);
+                m_log.ErrorFormat("[MONEY DB]: Credit {0} has an uncertain outcome; do not retry automatically: {1}", transactionID, e);
+                try { dbm.Manager.Reconnect(); }
+                catch (Exception reconnectError) { m_log.Error("[MONEY DB]: Reconnect failed after credit", reconnectError); }
+                return false;
             }
             catch (Exception e)
             {
@@ -425,25 +427,10 @@ namespace OpenSim.Grid.MoneyServer
             }
             catch (MySql.Data.MySqlClient.MySqlException e)
             {
-                m_log.ErrorFormat("[BuyMoney]: SQL Exception - {0}", e.Message);
-                dbm.Manager.Reconnect();
-
-                using (MySqlCommand cmd = new MySqlCommand(sql, dbm.Manager.dbcon))
-                {
-                    cmd.Parameters.AddWithValue("?amount", amount);
-                    cmd.Parameters.AddWithValue("?userID", userID);
-
-                    int rowsAffected = cmd.ExecuteNonQuery();
-                    bool result = (rowsAffected > 0);
-
-                    if (result)
-                    {
-                        LogTransaction(transactionID, userID, amount);
-                    }
-
-                    //m_log.DebugFormat("[BuyMoney]: End after Reconnect - transactionID: {0}, userID: {1}, amount: {2}, result: {3}", transactionID, userID, amount, result);
-                    return result;
-                }
+                m_log.ErrorFormat("[BuyMoney]: Transaction {0} has an uncertain outcome; no automatic credit retry: {1}", transactionID, e);
+                try { dbm.Manager.Reconnect(); }
+                catch (Exception reconnectError) { m_log.Error("[BuyMoney]: Reconnect failed after credit", reconnectError); }
+                return false;
             }
             catch (Exception e)
             {
