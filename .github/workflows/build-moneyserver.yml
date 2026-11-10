@@ -1,0 +1,82 @@
+name: Build MoneyServer against BloodMoon OpenSim
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - fix/mysql-auto-reconnect
+    paths:
+      - 'addon-modules/**'
+      - '.github/workflows/build-moneyserver.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout MoneyServer fixes
+        uses: actions/checkout@v4
+        with:
+          path: money-source
+
+      - name: Checkout BloodMoon OpenSimulator
+        uses: actions/checkout@v4
+        with:
+          repository: Vlad-BloodMoon/opensim
+          ref: release/bloodmoon-webrtc.3
+          path: opensim
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgdiplus libc6-dev
+
+      - name: Install MoneyServer addon modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d money-source/addon-modules
+          mkdir -p opensim/addon-modules
+          cp -a money-source/addon-modules/. opensim/addon-modules/
+          echo "Addon folders:"
+          find opensim/addon-modules -mindepth 1 -maxdepth 2 -type d | sort
+
+      - name: Generate OpenSimulator solution
+        working-directory: opensim
+        run: bash ./runprebuild.sh
+
+      - name: Compile OpenSimulator and money modules
+        working-directory: opensim
+        run: dotnet build --configuration Release OpenSim.sln --no-restore
+
+      - name: Verify money artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          find opensim/bin -maxdepth 2 -type f \( -iname '*Money*.dll' -o -name 'MoneyServer.dll' \) -print | sort
+          test -f opensim/bin/MoneyServer.dll
+          test -f opensim/bin/OpenSim.Data.MySQL.MySQLMoneyDataWrapper.dll
+
+      - name: Package compiled binaries (test only)
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p package
+          cp opensim/bin/MoneyServer.dll package/
+          find opensim/bin -maxdepth 1 -type f \( -iname '*Money*.dll' -o -iname '*Currency*.dll' \) -exec cp -n {} package/ \;
+          printf '%s\n' 'Test build only. Do not deploy without database recovery and transfer tests.' > package/TEST-BUILD.txt
+
+      - name: Upload test build
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: moneyserver-bloodmoon-test
+          path: package/
+          if-no-files-found: error
