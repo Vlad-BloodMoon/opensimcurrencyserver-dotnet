@@ -53,7 +53,7 @@ jobs:
 
       - name: Compile OpenSimulator and money modules
         working-directory: opensim
-        run: dotnet build --configuration Release OpenSim.sln --no-restore
+        run: dotnet build --configuration Release OpenSim.sln
 
       - name: Verify money artifacts
         shell: bash
