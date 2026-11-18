@@ -1,0 +1,168 @@
+name: Publish MoneyServer reconnect stable release
+
+on:
+  push:
+    branches:
+      - fix/mysql-auto-reconnect
+    paths:
+      - '.github/workflows/publish-moneyserver-v1.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout fixed MoneyServer source
+        uses: actions/checkout@v4
+        with:
+          path: money-source
+
+      - name: Checkout BloodMoon OpenSimulator build base
+        uses: actions/checkout@v4
+        with:
+          repository: Vlad-BloodMoon/opensim
+          ref: release/bloodmoon-webrtc.3
+          path: opensim
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgdiplus libc6-dev zip
+
+      - name: Add all currency modules to OpenSimulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d money-source/addon-modules/OpenSim-Grid-MoneyServer
+          test -d money-source/addon-modules/OpenSim-Data-MySQL-MySQLMoneyDataWrapper
+          test -d money-source/addon-modules/OpenSim-Modules-Currency
+          mkdir -p opensim/addon-modules
+          cp -a money-source/addon-modules/. opensim/addon-modules/
+
+      - name: Generate and compile the modules
+        shell: bash
+        working-directory: opensim
+        run: |
+          set -euo pipefail
+          bash ./runprebuild.sh
+          dotnet build --configuration Release OpenSim.sln
+
+      - name: Package server, regions and source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/server dist/regions dist/source
+          cp opensim/bin/MoneyServer.dll dist/server/
+          cp opensim/bin/OpenSim.Data.MySQL.MySQLMoneyDataWrapper.dll dist/server/
+          cp opensim/bin/OpenSim.Modules.Currency.dll dist/regions/
+          test -s dist/server/MoneyServer.dll
+          test -s dist/server/OpenSim.Data.MySQL.MySQLMoneyDataWrapper.dll
+          test -s dist/regions/OpenSim.Modules.Currency.dll
+          if test -f money-source/bin/MoneyServer.ini.example; then
+            cp money-source/bin/MoneyServer.ini.example dist/server/
+          fi
+          if test -f money-source/bin/MoneyServer.dll.config; then
+            cp money-source/bin/MoneyServer.dll.config dist/server/
+          fi
+          cat > dist/INSTALLATION.txt <<'EOF'
+          BloodMoon MoneyServer 1.0.0
+          
+          This is a stable release. Back up your database and existing binaries first.
+          The DLLs are modules for an existing compatible OpenSimulator .NET 8 installation,
+          not a stand-alone complete OpenSimulator distribution.
+          
+          MoneyServer (ROBUST host):
+            Stop the MoneyServer process.
+            Copy SERVER/MoneyServer.dll and SERVER/OpenSim.Data.MySQL.MySQLMoneyDataWrapper.dll
+            into the MoneyServer bin folder, keeping existing INI configuration.
+            Start MoneyServer and verify database access.
+          
+          OpenSimulator regions:
+            Stop each region process before replacing a loaded DLL.
+            Copy REGIONS/OpenSim.Modules.Currency.dll into each region's bin folder.
+            Keep each region's existing currency INI settings.
+            Start the region process.
+          
+          The server module reconnects to MySQL when the connection is stale.
+          The region module restores avatar money login after an explicit session
+          rejection following a MoneyServer restart.
+          
+          Tested: restart MoneyServer, balance, transfer and object purchase without
+          teleport/logoff; close MySQL test-user connections, recover balance,
+          transfer and object purchase.
+          Not yet tested: service-wide MySQL restart, interruption midway through
+          a monetary transaction, concurrent failure scenarios.
+          
+          Never replace production DLLs while their processes are running.
+          EOF
+          cp -a money-source/addon-modules/. dist/source/
+          test -s money-source/docs/REGION_INSTALLATION.md
+          mkdir -p dist/docs
+          cp money-source/docs/REGION_INSTALLATION.md dist/docs/
+          cp money-source/docs/REGION_INSTALLATION.md dist/server/REGION_INSTALLATION.md
+          cp money-source/docs/REGION_INSTALLATION.md dist/regions/REGION_INSTALLATION.md
+          cp dist/INSTALLATION.txt dist/server/
+          cp dist/INSTALLATION.txt dist/regions/
+          mkdir -p releases
+          (cd dist/server && zip -q -r ../../releases/MoneyServer-1.0.0-Server.zip .)
+          (cd dist/regions && zip -q -r ../../releases/MoneyServer-1.0.0-Regions.zip .)
+          (cd dist/source && zip -q -r ../../releases/MoneyServer-1.0.0-SourceModules.zip .)
+          (cd dist && zip -q -r ../releases/MoneyServer-1.0.0-Complete.zip server regions docs INSTALLATION.txt)
+          (cd releases && sha256sum *.zip > SHA256SUMS.txt)
+          ls -lh releases
+
+      - name: Publish GitHub prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if gh release view v1.0.0 >/dev/null 2>&1; then
+            echo 'Release v1.0.0 already exists; do not overwrite it.'
+            exit 1
+          fi
+          cat > release-notes.md <<'EOF'
+          ## BloodMoon MoneyServer v1.0.0
+
+          Release containing **both MoneyServer and OpenSimulator region fixes** (built against BloodMoon OpenSimulator 0.9.3.1 / .NET 8).
+
+          ### Downloads
+          - **Complete**: all three DLLs, arranged in `server/` and `regions/`.
+          - **Server**: `MoneyServer.dll` and `OpenSim.Data.MySQL.MySQLMoneyDataWrapper.dll`, plus example configuration.
+          - **Regions**: `OpenSim.Modules.Currency.dll`.
+          - **SourceModules**: all three currency module source trees.
+          - The full region-side `[Economy]` configuration guide (`REGION_INSTALLATION.md`) is included in the Complete, Server and Regions archives.
+          - SHA256 checksums are supplied.
+
+          ### Region-side configuration
+          Set `EconomyModule = DTLNSLMoneyModule`, `CurrencyServer` (MoneyServer endpoint) and `UserServer` (ROBUST user service endpoint) in the active `[Economy]` section; see `REGION_INSTALLATION.md` for a full example and explanation. The source project also includes `bin/OpenSim.ini.sample`.
+
+          ### Fixes
+          - MySQL connection health checks and reconnect on stale sessions.
+          - Automatic restoration of avatar currency sessions after MoneyServer restarts, without region restart, teleport or viewer relog.
+          - Guarded retry only when MoneyServer explicitly rejects the request for a missing session; no blind retry on network timeouts.
+          - Safer atomic transfer handling to reduce duplicate application risks.
+
+          ### Verified in tests
+          - MoneyServer restart while an avatar stayed on the same region, followed by successful balance refresh, avatar transfer and object purchase.
+          - Closing the dedicated test user's MySQL connections while keeping MySQL, MoneyServer and the simulator running, followed by successful balance refresh, transfer and object purchase.
+
+          ### Still to validate
+          - Real MySQL service restart and interrupted/in-flight transactions.
+          - Concurrent transactions and other advanced money operations (including script payments).
+
+          **Recommended: test in your own environment before production deployment.** Back up the monetary database and previous DLLs, stop the relevant processes before replacing binaries, and retain existing INI configuration. These are modules for an existing compatible OpenSimulator installation, not a standalone grid distribution.
+          EOF
+          gh release create v1.0.0 releases/* \
+            --target "$GITHUB_SHA" \
+            --title "BloodMoon MoneyServer v1.0.0 — MySQL + region reconnect" \
+            --notes-file release-notes.md \
+            --latest
